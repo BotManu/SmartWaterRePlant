@@ -1,0 +1,8 @@
+The hardware consists of:
+- an arduino uno
+- a 1602 lcd with 6 buttons
+- a hc-sr 04 ultrasonic sensor
+- a dht temp / humid sensor
+- a soild humidity sensor (with analog output)
+- a stepper motor to open / close a valve driven by a uln driver (IN1, IN2, IN3, IN4)
+- a relay for a water - pump on/off
