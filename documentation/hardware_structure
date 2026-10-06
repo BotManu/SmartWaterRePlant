@@ -6,3 +6,20 @@ The hardware consists of:
 - a soild humidity sensor (with analog output)
 - a stepper motor to open / close a valve driven by a uln driver (IN1, IN2, IN3, IN4)
 - a relay for a water - pump on/off
+
+| Component | Signal | Uno pin |
+|---|---|---|
+| HC-SR04 | TRIG | D2 |
+| HC-SR04 | ECHO | D12 |
+| DHT sensor | DATA | A2 |
+| Soil moisture sensor | AO | A1 |
+| ULN stepper driver | IN1 | D3 |
+| ULN stepper driver | IN2 | D11 |
+| ULN stepper driver | IN3 | **A4** |
+| ULN stepper driver | IN4 | **A5** |
+| Relay module | IN | **A3** |
+| LCD shield | RS / Enable | D8 / D9 |
+| LCD shield | Data D4–D7 | D4–D7 |
+| LCD shield | Buttons | A0 |
+| LCD shield | Backlight | D10, reserved |
+
