@@ -31,8 +31,8 @@ Use SELECT, LEFT/RIGHT, SELECT to return to MANUAL.
 
 ## Tank behavior and faults
 
-Tank percentage is clamped to 0..100 using `(60 - distance_mm) / 40 * 100`:
-60 mm is empty, 40 mm is 50%, and 20 mm is the configured full limit.
+Tank percentage is clamped to 0..100 using `(55 - distance_mm) / 35 * 100`:
+55 mm is empty, 37.5 mm is 50%, and 20 mm is the configured full limit.
 The documented 45 mm tank height is not used instead of these measured distances.
 
 An empty tank or invalid/stale ultrasonic reading blocks/stops the pump. Manual
@@ -43,7 +43,7 @@ valve and diagnostics screens; the operator controls filling and closing. A full
 tank can still supply the pump. Air/soil faults are reported in diagnostics but
 do not disable manual actuation.
 
-The ultrasonic read has a 3 ms timeout and repeats every 150 ms. Distances below
+The ultrasonic read has a 30 ms timeout and repeats every 500 ms. Distances below
 20 mm, above 80 mm, and missing echoes are faults rather than valid percentages.
 The 20 mm full point is at the HC-SR04's nominal minimum range: check actual
 readings near full before relying on this placement. A missing echo cannot
@@ -90,7 +90,7 @@ Bench checks (require the actual hardware; not performed by the build):
 1. Verify the pump is off at boot, valve shows Unknown, and each button works.
 2. Navigate both directions through all five screens; confirm wraparound and
    alternating temperature/humidity. Check the soil percentage against calibration.
-3. Verify tank readings at 60, 40, and 20 mm. Disconnect ECHO and verify ERR.
+3. Verify tank readings at 55, 37.5, and 20 mm. Disconnect ECHO and verify ERR.
 4. At a valid intermediate level, verify UP opens and DOWN closes for five
    seconds, with the expected direction. Change screens during travel and confirm
    movement still finishes. Verify the coils switch off afterward.

@@ -33,6 +33,9 @@ struct Sensors {
   bool airValid = false;
   bool soilValid = false;
   bool tankValid = false;
+  unsigned long echoUs = 0;
+  bool echoBefore = false;
+  bool echoAfter = false;
   uint32_t airAt = 0;
   uint32_t soilAt = 0;
   uint32_t tankAt = 0;
@@ -40,6 +43,17 @@ struct Sensors {
 
 bool elapsed(uint32_t now, uint32_t since, uint32_t interval) {
   return uint32_t(now - since) >= interval;
+}
+
+const __FlashStringHelper *tankStatus(uint32_t now) {
+  if (sensors.tankAt == 0) return F("Tank: waiting");
+  if (elapsed(now, sensors.tankAt, Config::sensorStaleMs)) return F("Tank: stale");
+  if (sensors.echoBefore) return F("Echo HIGH idle");
+  if (!sensors.echoUs)
+    return sensors.echoAfter ? F("Echo HIGH late") : F("Tank: no echo");
+  if (sensors.distanceMm < Config::tankMinReadableMm) return F("Tank: <min range");
+  if (sensors.distanceMm > Config::tankMaxPlausibleMm) return F("Tank: >max range");
+  return F("Tank range OK");
 }
 
 bool valveMoving() {
@@ -118,12 +132,20 @@ void readSensors(uint32_t now) {
   static uint32_t lastTank = 0, lastSoil = 0, lastAir = 0;
   if (elapsed(now, lastTank, Config::tankReadMs)) {
     lastTank = now;
-    digitalWrite(Config::triggerPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(Config::triggerPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(Config::triggerPin, LOW);
-    const unsigned long duration = pulseIn(Config::echoPin, HIGH, Config::echoTimeoutUs);
+    sensors.echoBefore = digitalRead(Config::echoPin) == HIGH;
+    unsigned long duration = 0;
+    const uint32_t readStartedUs = micros();
+    if (!sensors.echoBefore) {
+      digitalWrite(Config::triggerPin, LOW);
+      delayMicroseconds(2);
+      digitalWrite(Config::triggerPin, HIGH);
+      delayMicroseconds(10);
+      digitalWrite(Config::triggerPin, LOW);
+      duration = pulseIn(Config::echoPin, HIGH, Config::echoTimeoutUs);
+    }
+    const uint32_t readTimeUs = micros() - readStartedUs;
+    sensors.echoAfter = digitalRead(Config::echoPin) == HIGH;
+    sensors.echoUs = duration;
     sensors.distanceMm = duration ? duration * 0.343f / 2.0f : NAN;
     sensors.tankValid = duration != 0 &&
         sensors.distanceMm >= Config::tankMinReadableMm &&
@@ -133,6 +155,20 @@ void readSensors(uint32_t now) {
       sensors.tankPercent = constrain(int(roundf(100.0f *
           (Config::tankEmptyMm - sensors.distanceMm) /
           (Config::tankEmptyMm - Config::tankFullMm))), 0, 100);
+    // Avoid serial transmission adding pauses during motor movement/pump runs.
+    if (Config::tankDebugSerial && !valveMoving() && !pumpRunning) {
+      Serial.print(F("tank ms=")); Serial.print(sensors.tankAt);
+      Serial.print(F(" trig=D")); Serial.print(Config::triggerPin);
+      Serial.print(F(" echo=D")); Serial.print(Config::echoPin);
+      Serial.print(F(" before=")); Serial.print(sensors.echoBefore);
+      Serial.print(F(" after=")); Serial.print(sensors.echoAfter);
+      Serial.print(F(" read_us=")); Serial.print(readTimeUs);
+      Serial.print(F(" pulse_us=")); Serial.print(duration);
+      Serial.print(F(" distance_mm="));
+      if (duration) Serial.print(sensors.distanceMm, 2);
+      else Serial.print(F("NA"));
+      Serial.print(F(" status=")); Serial.println(tankStatus(millis()));
+    }
   }
   if (elapsed(now, lastSoil, Config::soilReadMs)) {
     lastSoil = now;
@@ -162,7 +198,7 @@ bool tankHealthy(uint32_t now) {
 }
 
 const __FlashStringHelper *diagnostic(uint32_t now) {
-  if (!tankHealthy(now)) return F("Tank sensor ERR");
+  if (!tankHealthy(now)) return tankStatus(now);
   if (sensors.distanceMm <= Config::tankFullMm) return F("Tank full/limit");
   if (sensors.distanceMm >= Config::tankEmptyMm) return F("Tank empty");
   if (!sensors.airValid || elapsed(now, sensors.airAt, Config::sensorStaleMs))
@@ -270,10 +306,10 @@ void render(uint32_t now) {
         break;
       case Screen::Valve:
         top.print(F("Valve: ")); top.print(valveText());
-        bottom.print(F("Tank:"));
-        if (tankHealthy(now)) { bottom.print(sensors.tankPercent); bottom.print('%'); }
-        else bottom.print(F("ERR"));
-        bottom.print(F(" U+ D-"));
+        if (tankHealthy(now)) {
+          bottom.print(F("Tank:")); bottom.print(sensors.tankPercent);
+          bottom.print(F("% U+ D-"));
+        } else bottom.print(tankStatus(now));
         break;
       case Screen::Pump:
         top.print(F("Pump: ")); top.print(pumpRunning ? F("Running") : F("Off"));
@@ -299,6 +335,10 @@ void render(uint32_t now) {
 }
 
 void setup() {
+  if (Config::tankDebugSerial) {
+    Serial.begin(115200);
+    Serial.println(F("SmartRePlant MAIN: tank debug, 30ms timeout / 500ms sampling"));
+  }
   // Preload the inactive relay level before enabling the output.
   setPump(false);
   pinMode(Config::relayPin, OUTPUT);

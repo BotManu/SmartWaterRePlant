@@ -13,7 +13,7 @@ There are multiple screens that can be cycled using left / right buttons
 - the temp / humid of the air can be displayed on first screen
 - the soil humidity level can be displayed on second screen
 - the valve (one that allows water to be poured into the tank) state is displayed and can be commuted
-using up / down buttons. The same screen shows water level in percents (tank heigth is about 45 mm, sensor reads 60 mm when the tank is empty and 20 mm for the full tank (for safety))
+using up / down buttons. The same screen shows water level in percents (tank heigth is about 45 mm, sensor reads 55 mm when the tank is empty and 20 mm for the full tank (for safety))
 - the water pump state is displayed and can be turned on in periods of 2 seconds at the press of the up button (the displayed state turns to running)
 - a general system diagnosys screen shows if running is safe (all sensors are within normal limits, tank is not overflowing)
 
