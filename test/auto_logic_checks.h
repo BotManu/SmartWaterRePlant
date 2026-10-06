@@ -1,7 +1,43 @@
 #pragma once
 #include "auto_logic.h"
+#include "config.h"
 
 namespace AutoChecks {
+static_assert(Config::tankReadingInRange(37.4f), "Full endpoint minus 5 mm accepted");
+static_assert(Config::tankReadingInRange(66.5f), "Empty endpoint plus 5 mm accepted");
+static_assert(Config::tankReadingInRange(42.4f) && Config::tankReadingInRange(61.5f),
+              "Calibrated endpoints accepted");
+static_assert(!Config::tankReadingInRange(37.3f) && !Config::tankReadingInRange(66.6f),
+              "Beyond endpoint tolerance rejected");
+constexpr bool settledTank() {
+  AutoLogic::SettledLevel f;
+  for (uint8_t i = 0; i < 4; ++i)
+    if (f.observe(50, true, i * 500UL, 0.8f, 2000, 1500)) return false;
+  if (!f.observe(50.2f, true, 2000, 0.8f, 2000, 1500)) return false;
+  if (f.observe(58, true, 2500, 0.8f, 2000, 1500)) return false;
+  for (uint8_t i = 0; i < 10; ++i)
+    if (f.observe(i % 2 ? 43 : 60, true, 3000 + i * 500UL, 0.8f, 2000, 1500)) return false;
+  f.invalidate(); // Pump running / three-second post-pump pause.
+  if (f.healthy(8500, 1500)) return false;
+  for (uint8_t i = 0; i < 4; ++i)
+    if (f.observe(61.5f, true, 9000 + i * 500UL, 0.8f, 2000, 1500)) return false;
+  if (!f.observe(61.5f, true, 11000, 0.8f, 2000, 1500)) return false;
+  if (f.output != 61.5f) return false;
+  if (f.observe(70, false, 11500, 0.8f, 2000, 1500)) return false;
+  return !f.healthy(11500, 1500);
+}
+constexpr bool automaticCloseDelay() {
+  AutoLogic::CloseDelay d;
+  d.request(1000);
+  d.request(2000); // Repeated requests cannot restart the countdown.
+  if (d.due(3999, 3000) || !d.due(4000, 3000)) return false;
+  d.pending = false;
+  if (d.due(5000, 3000)) return false;
+  d.request(0xFFFFFF00UL);
+  return !d.due(1000, 3000) && d.due(uint32_t(0xFFFFFF00UL + 3000), 3000);
+}
+static_assert(settledTank(), "Turbulent and out-of-range readings cannot set tank level");
+static_assert(automaticCloseDelay(), "Every automatic close waits the full three seconds");
 constexpr bool wateringCycle() {
   AutoLogic::Watering w;
   if (w.request(0, 50, 60, true, true, 300000)) return false;

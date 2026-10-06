@@ -117,6 +117,61 @@ struct TankFilter {
   }
 };
 
+// Require a full window of in-range RAW readings to be steady, not just a
+// smooth filtered output. Invalid readings/movement restart qualification.
+struct SettledLevel {
+  float values[5] = {};
+  float output = 0;
+  uint8_t count = 0, cursor = 0;
+  uint32_t acceptedAt = 0, stableSince = 0;
+  bool fresh = false, ready = false, qualifying = false;
+  constexpr void invalidate() {
+    count = cursor = 0;
+    fresh = ready = qualifying = false;
+  }
+  constexpr bool healthy(uint32_t now, uint32_t maxAge) const {
+    return ready && !elapsed(now, acceptedAt, maxAge);
+  }
+  constexpr bool observe(float value, bool valid, uint32_t now,
+                         float maxSpread, uint32_t steadyMs, uint32_t maxGap) {
+    fresh = false;
+    if (ready && !healthy(now, maxGap)) invalidate();
+    if (!valid) { invalidate(); return false; }
+    values[cursor] = value;
+    cursor = (cursor + 1) % 5;
+    if (count < 5) ++count;
+    float low = values[0], high = values[0], sum = 0;
+    for (uint8_t i = 0; i < count; ++i) {
+      if (values[i] < low) low = values[i];
+      if (values[i] > high) high = values[i];
+      sum += values[i];
+    }
+    if (high - low > maxSpread) {
+      ready = qualifying = false;
+      return false;
+    }
+    if (!qualifying) { qualifying = true; stableSince = now; }
+    if (count < 5 || !elapsed(now, stableSince, steadyMs)) {
+      ready = false;
+      return false;
+    }
+    output = sum / count;
+    acceptedAt = now;
+    return fresh = ready = true;
+  }
+};
+
+struct CloseDelay {
+  bool pending = false;
+  uint32_t startedAt = 0;
+  constexpr void request(uint32_t now) {
+    if (!pending) { pending = true; startedAt = now; }
+  }
+  constexpr bool due(uint32_t now, uint32_t delayMs) const {
+    return pending && elapsed(now, startedAt, delayMs);
+  }
+};
+
 struct FillTrend {
   float values[10] = {};
   uint8_t count = 0, cursor = 0;

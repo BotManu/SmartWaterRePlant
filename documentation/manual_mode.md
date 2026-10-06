@@ -25,37 +25,27 @@ on A2. The pin assignments are those in `hardware_structure`.
   Otherwise it displays NOT SAFE and the first detected issue.
 
 AUTO is implemented as described in `auto_mode.md`. Changing modes stops the pump.
-Use SELECT, LEFT/RIGHT, SELECT to return to MANUAL. The latest five valid tank
-readings are filtered using median outlier rejection and a remaining-value mean
-in both modes.
+Use SELECT, LEFT/RIGHT, SELECT to return to MANUAL.
 
 ## Tank behavior and faults
 
-Tank percentage is clamped to 0..100 using `(55 - distance_mm) / 50 * 100`:
-55 mm is empty, 30 mm is 50%, 20 mm is 70%, and 5 mm is the requested full limit.
-The documented 45 mm tank height is not used instead of these measured distances.
+Calibration is 61.5 mm empty and 42.4 mm full, covering approximately 500 mL.
+The level mapping is `(61.5 - distance_mm) / 19.1 * 100`.
+Both modes require five in-range raw samples spanning at most 0.8 mm, stable for
+at least two seconds, before updating the level. See auto_mode.md for details.
+Chaotic readings display settling rather than an invented percentage.
 
-An empty tank or confirmed invalid/stale ultrasonic reading blocks/stops the pump.
-Isolated rejected echoes hold the trusted level for less than 1.5 seconds; after
-that it becomes a fault. Startup/recovery and jumps above 6 mm require three
-consistent readings. See `auto_mode.md` for the shared filter details. Manual
-valve UP/DOWN commands work independently of tank readings, as specified in
-`software_and_device_working`. Full/invalid readings do not block opening or
-automatically reverse a manual valve movement. Tank faults remain visible on the
-valve and diagnostics screens; the operator controls filling and closing. A full
-tank can still supply the pump. Air/soil faults are reported in diagnostics but
-do not disable manual actuation.
+Pump commands require a settled nonempty tank. Once started, a two-second dose
+finishes on its timer despite turbulent readings; DOWN can stop it early. After
+stopping, wait three seconds and collect a new steady window before another dose.
+Manual valve UP/DOWN commands remain direct and independent of tank readings.
+Automatic closures always flash for three seconds before five-second travel,
+including closure scheduled when leaving AUTO during filling.
 
-The ultrasonic read has a 30 ms timeout and repeats every 500 ms. Distances below
-20 mm, above 80 mm, and missing echoes are faults rather than valid percentages.
-The requested 5 mm full point is below the HC-SR04's 20 mm minimum range.
-With the current mounting, levels above 70% cannot be reliably measured and the
-sensor validity check will fault before AUTO's >90% full warning. Raise the sensor
-at least 15 mm and recalibrate both endpoints: a 15 mm rise gives approximately
-70 mm empty / 20 mm full for the same requested water levels. Additional mounting
-clearance provides margin above the minimum range. A missing echo cannot
-distinguish overflow from a disconnected sensor. Closing itself takes five
-seconds; leave enough physical filling margin for that travel time.
+Ultrasonic readings are sampled every 500 ms with a 30 ms echo timeout. Readings
+outside 37.4..66.5 mm never qualify as tank levels. The raw diagnostic remains
+available to investigate out-of-range values. Full-tank closure cannot rely on
+chaotic readings: qualify physical filling and settling behavior on the bench.
 
 Soil is sampled every 250 ms. DHT reads run every 2.5 seconds when actuators are
 idle to avoid interrupting their timing with the DHT library's blocking read.
@@ -98,14 +88,15 @@ Bench checks (require the actual hardware; not performed by the build):
 1. Verify the pump is off at boot, valve shows Unknown, and each button works.
 2. Navigate both directions through all five screens; confirm wraparound and
    alternating temperature/humidity. Check the soil percentage against calibration.
-3. Verify tank readings at 55, 30, and 20 mm (0%, 50%, 70%). Reposition and
-   recalibrate the sensor before testing the new full point. Disconnect ECHO and verify ERR.
+3. Verify steady values at 61.5, 51.95, and 42.4 mm (0%, 50%, 100%).
+   Inject turbulent or missing echoes and confirm no level is accepted.
 4. At a valid intermediate level, verify UP opens and DOWN closes for five
    seconds, with the expected direction. Change screens during travel and confirm
    movement still finishes. Verify the coils switch off afterward.
 5. Run the pump and measure its two-second pulse. Hold UP beyond two seconds:
    it must stop and remain stopped. Release/repress to run again; test DOWN stop.
-6. While the pump runs, simulate empty tank or missing ECHO: it must stop.
+6. While the pump runs, simulate missing/chaotic echoes: the two-second run
+   must complete, and another run must wait for settled readings.
    With missing ECHO, verify that valve UP still shows Opening and drives the
    motor for five seconds without reversing. DOWN must close it for five seconds.
    Repeat at the full threshold: both manual commands must still work while
@@ -115,3 +106,8 @@ Bench checks (require the actual hardware; not performed by the build):
 8. Enter the selector during an actuator action and verify its timer continues.
    Choose AUTO without confirming: mode must not change. Confirm AUTO: pump
    stops and the five-second target screen appears. Return to MANUAL.
+
+Endpoint tolerance: accept steady readings from 37.4 to 66.5 mm, inclusive.
+Calibration remains 42.4 mm = 100% and 61.5 mm = 0%, representing 500 mL.
+Values beyond the calibrated endpoints clamp to 100%/0%; the tolerance does not
+change the 0.8 mm steadiness limit or AUTO thresholds.
