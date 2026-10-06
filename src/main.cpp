@@ -1,9 +1,14 @@
 #include <Arduino.h>
 #include <DHT.h>
 #include <LiquidCrystal.h>
+#include <EEPROM.h>
 #include <math.h>
 #include <string.h>
 #include "config.h"
+#include "auto_logic.h"
+#ifdef AUTO_LOGIC_CHECKS
+#include "../test/auto_logic_checks.h"
+#endif
 
 namespace {
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
@@ -12,6 +17,22 @@ enum class Button : uint8_t { None, Right, Up, Down, Left, Select };
 enum class Mode : uint8_t { Manual, Auto };
 enum class Screen : uint8_t { Air, Soil, Valve, Pump, Diagnostics, Count };
 enum class Valve : uint8_t { Unknown, Opening, Open, Closing, Closed };
+enum class AutoScreen : uint8_t { Reference, Info, Mode, Valve, Count };
+enum class AutoStage : uint8_t { Intro, Analyze, Running };
+AutoScreen autoScreen = AutoScreen::Info;
+AutoStage autoStage = AutoStage::Intro;
+uint8_t soilTarget = Config::defaultSoilTarget;
+uint8_t editedTarget = Config::defaultSoilTarget;
+bool editingTarget = false;
+AutoLogic::Watering watering;
+AutoLogic::TankFilter levelFilter;
+AutoLogic::FillTrend fillTrend;
+uint32_t autoEnteredAt = 0, fullWarningAt = 0, fullWarningDuration = 0;
+uint32_t lastGrowthAt = 0, monitorSeconds = 0;
+bool fullWarning = false, fullHandled = false, filling = false, emptyHandled = false;
+bool accounting = false, accountSettling = false, waterEstimateValid = true;
+float doseStartPercent = 0, usedWaterMl = 0;
+uint32_t accountStoppedAt = 0;
 Mode mode = Mode::Manual;
 Mode pendingMode = Mode::Manual;
 Screen screen = Screen::Air;
@@ -27,6 +48,8 @@ struct Sensors {
   float temperature = NAN;
   float humidity = NAN;
   float distanceMm = NAN;
+  float rawDistanceMm = NAN;
+  float tankLevel = 0;
   int soilRaw = 0;
   int soilPercent = 0;
   int tankPercent = 0;
@@ -39,6 +62,7 @@ struct Sensors {
   uint32_t airAt = 0;
   uint32_t soilAt = 0;
   uint32_t tankAt = 0;
+  uint32_t tankSampleAt = 0;
 } sensors;
 
 bool elapsed(uint32_t now, uint32_t since, uint32_t interval) {
@@ -46,14 +70,15 @@ bool elapsed(uint32_t now, uint32_t since, uint32_t interval) {
 }
 
 const __FlashStringHelper *tankStatus(uint32_t now) {
-  if (sensors.tankAt == 0) return F("Tank: waiting");
-  if (elapsed(now, sensors.tankAt, Config::sensorStaleMs)) return F("Tank: stale");
+  if (sensors.tankSampleAt == 0) return F("Tank: waiting");
+  if (sensors.tankValid && levelFilter.healthy(now, Config::tankHoldMs))
+    return levelFilter.fresh ? F("Tank range OK") : F("Tank: held");
   if (sensors.echoBefore) return F("Echo HIGH idle");
   if (!sensors.echoUs)
     return sensors.echoAfter ? F("Echo HIGH late") : F("Tank: no echo");
-  if (sensors.distanceMm < Config::tankMinReadableMm) return F("Tank: <min range");
-  if (sensors.distanceMm > Config::tankMaxPlausibleMm) return F("Tank: >max range");
-  return F("Tank range OK");
+  if (sensors.rawDistanceMm < Config::tankMinReadableMm) return F("Tank: <min range");
+  if (sensors.rawDistanceMm > Config::tankMaxPlausibleMm) return F("Tank: >max range");
+  return levelFilter.confirmations ? F("Tank: checking") : F("Tank: stale");
 }
 
 bool valveMoving() {
@@ -61,6 +86,18 @@ bool valveMoving() {
 }
 
 void setPump(bool running) {
+  if (running && !pumpRunning) {
+    // A second manual pulse before settling belongs to the same measurement.
+    if (!accounting) {
+      accounting = sensors.tankValid;
+      doseStartPercent = sensors.tankLevel;
+    }
+    accountSettling = false;
+  } else if (!running && pumpRunning) {
+    watering.finished(millis());
+    accountSettling = accounting;
+    accountStoppedAt = millis();
+  }
   digitalWrite(Config::relayPin, running == Config::relayActiveLow ? LOW : HIGH);
   pumpRunning = running;
 }
@@ -146,18 +183,41 @@ void readSensors(uint32_t now) {
     const uint32_t readTimeUs = micros() - readStartedUs;
     sensors.echoAfter = digitalRead(Config::echoPin) == HIGH;
     sensors.echoUs = duration;
-    sensors.distanceMm = duration ? duration * 0.343f / 2.0f : NAN;
-    sensors.tankValid = duration != 0 &&
-        sensors.distanceMm >= Config::tankMinReadableMm &&
-        sensors.distanceMm <= Config::tankMaxPlausibleMm;
-    sensors.tankAt = millis();
-    if (sensors.tankValid)
-      sensors.tankPercent = constrain(int(roundf(100.0f *
+    sensors.rawDistanceMm = duration ? duration * 0.343f / 2.0f : NAN;
+    const bool rawValid = duration != 0 &&
+        sensors.rawDistanceMm >= Config::tankMinReadableMm &&
+        sensors.rawDistanceMm <= Config::tankMaxPlausibleMm;
+    sensors.tankSampleAt = millis();
+    sensors.tankValid = levelFilter.observe(sensors.rawDistanceMm, rawValid,
+        sensors.tankSampleAt, Config::tankOutlierMm, Config::tankJumpMm,
+        Config::tankConfirmReadings, Config::tankHoldMs);
+    if (levelFilter.fresh) {
+      sensors.tankAt = levelFilter.acceptedAt;
+      sensors.distanceMm = levelFilter.output;
+      sensors.tankLevel = constrain(100.0f *
           (Config::tankEmptyMm - sensors.distanceMm) /
-          (Config::tankEmptyMm - Config::tankFullMm))), 0, 100);
+          (Config::tankEmptyMm - Config::tankFullMm), 0.0f, 100.0f);
+      sensors.tankPercent = int(roundf(sensors.tankLevel));
+      fillTrend.add(sensors.tankLevel);
+    } else {
+      // Held values are not new evidence that the tank is filling.
+      fillTrend.clear();
+      if (!sensors.tankValid) {
+        if (accounting) waterEstimateValid = false;
+        accounting = accountSettling = false;
+      }
+    }
+    if (accounting && sensors.tankLevel > doseStartPercent + Config::fillRisePercent) {
+      waterEstimateValid = false; // Inflow masks consumption; do not invent savings.
+      accounting = accountSettling = false;
+    }
+    if (accountSettling && levelFilter.fresh && elapsed(millis(), accountStoppedAt, Config::waterSettleMs)) {
+      usedWaterMl += max(0.0f, doseStartPercent - sensors.tankLevel) * Config::tankCapacityMl / 100.0f;
+      accounting = accountSettling = false;
+    }
     // Avoid serial transmission adding pauses during motor movement/pump runs.
     if (Config::tankDebugSerial && !valveMoving() && !pumpRunning) {
-      Serial.print(F("tank ms=")); Serial.print(sensors.tankAt);
+      Serial.print(F("tank ms=")); Serial.print(sensors.tankSampleAt);
       Serial.print(F(" trig=D")); Serial.print(Config::triggerPin);
       Serial.print(F(" echo=D")); Serial.print(Config::echoPin);
       Serial.print(F(" before=")); Serial.print(sensors.echoBefore);
@@ -165,8 +225,11 @@ void readSensors(uint32_t now) {
       Serial.print(F(" read_us=")); Serial.print(readTimeUs);
       Serial.print(F(" pulse_us=")); Serial.print(duration);
       Serial.print(F(" distance_mm="));
-      if (duration) Serial.print(sensors.distanceMm, 2);
+      if (duration) Serial.print(sensors.rawDistanceMm, 2);
       else Serial.print(F("NA"));
+      Serial.print(F(" filtered_mm=")); Serial.print(sensors.distanceMm, 2);
+      Serial.print(F(" accepted=")); Serial.print(levelFilter.fresh);
+      Serial.print(F(" age_ms=")); Serial.print(uint32_t(millis() - sensors.tankAt));
       Serial.print(F(" status=")); Serial.println(tankStatus(millis()));
     }
   }
@@ -194,11 +257,13 @@ void readSensors(uint32_t now) {
 }
 
 bool tankHealthy(uint32_t now) {
-  return sensors.tankValid && !elapsed(now, sensors.tankAt, Config::sensorStaleMs);
+  return sensors.tankValid && levelFilter.healthy(now, Config::tankHoldMs);
 }
 
 const __FlashStringHelper *diagnostic(uint32_t now) {
   if (!tankHealthy(now)) return tankStatus(now);
+  if (mode == Mode::Auto && sensors.tankLevel > 90) return F("Tank full/limit");
+  if (mode == Mode::Auto && sensors.tankLevel < 10) return F("Tank empty");
   if (sensors.distanceMm <= Config::tankFullMm) return F("Tank full/limit");
   if (sensors.distanceMm >= Config::tankEmptyMm) return F("Tank empty");
   if (!sensors.airValid || elapsed(now, sensors.airAt, Config::sensorStaleMs))
@@ -214,19 +279,130 @@ void applyTankProtection(uint32_t now) {
   if (!tankHealthy(now) || sensors.distanceMm >= Config::tankEmptyMm) setPump(false);
 }
 
+void backlight(bool on) {
+  // Weak pull-up for ON avoids driving D10 strongly HIGH on keypad-shield clones.
+  if (on) pinMode(Config::backlightPin, INPUT_PULLUP);
+  else { digitalWrite(Config::backlightPin, LOW); pinMode(Config::backlightPin, OUTPUT); }
+}
+
+void changeMode(Mode next, uint32_t now) {
+  if (mode == next) return;
+  setPump(false);
+  // Do not leave an automatic refill open when handing control back to MANUAL.
+  if (mode == Mode::Auto && (filling || fullWarning)) startValve(false, now);
+  mode = next;
+  filling = fullWarning = false;
+  editingTarget = false;
+  backlight(true);
+  if (mode == Mode::Auto) {
+    autoEnteredAt = now;
+    autoStage = AutoStage::Intro;
+    autoScreen = AutoScreen::Info;
+    fullHandled = emptyHandled = false;
+    editedTarget = soilTarget;
+  }
+}
+
+void warnFull(uint32_t now, uint32_t duration) {
+  setPump(false);
+  fullWarning = fullHandled = true;
+  fullWarningAt = now;
+  fullWarningDuration = duration;
+  // Stop further opening during the warning; position is now unverified.
+  if (valve == Valve::Opening) { valve = Valve::Unknown; releaseStepper(); }
+}
+
+void updateAuto(uint32_t now) {
+  if (mode != Mode::Auto) return;
+  if (autoStage == AutoStage::Intro) {
+    if (!elapsed(now, autoEnteredAt, Config::autoIntroMs)) return;
+    autoStage = AutoStage::Analyze;
+  }
+  if (fullWarning) {
+    backlight(((now - fullWarningAt) / 250) % 2 == 0);
+    if (!elapsed(now, fullWarningAt, fullWarningDuration)) return;
+    backlight(true);
+    fullWarning = false;
+    filling = false;
+    startValve(false, now);
+    autoStage = AutoStage::Running;
+  }
+  if (!tankHealthy(now)) {
+    setPump(false);
+    if (valve == Valve::Open || valve == Valve::Opening) startValve(false, now);
+    filling = false;
+    return;
+  }
+  if (autoStage == AutoStage::Analyze) {
+    if (sensors.tankLevel > 90) {
+      warnFull(now, Config::startupFullWarningMs);
+      return;
+    }
+    autoStage = AutoStage::Running;
+  }
+  if (sensors.tankLevel <= 85) fullHandled = false;
+  if (sensors.tankLevel >= 15) emptyHandled = false;
+  if (sensors.tankLevel > 90 &&
+      (!fullHandled || valve == Valve::Open || valve == Valve::Opening)) {
+    warnFull(now, Config::fullWarningMs);
+    return;
+  }
+  const bool rising = fillTrend.rising(Config::fillRisePercent);
+  if (!fullHandled && !filling && sensors.tankLevel < 10 && !emptyHandled) {
+    filling = emptyHandled = true;
+    lastGrowthAt = now;
+    setPump(false);
+    startValve(true, now);
+  }
+  if (!fullHandled && rising && !filling) {
+    filling = true;
+    lastGrowthAt = now;
+    setPump(false);
+  }
+  if (filling) {
+    if (rising || valve == Valve::Opening) lastGrowthAt = now;
+    if (elapsed(now, lastGrowthAt, Config::fillStableMs)) {
+      filling = false;
+      startValve(false, now);
+    }
+    return;
+  }
+  const bool soilHealthy = sensors.soilValid &&
+      !elapsed(now, sensors.soilAt, Config::sensorStaleMs);
+  if (!soilHealthy || sensors.tankLevel < 10) setPump(false);
+  const bool allowed = soilHealthy && sensors.tankLevel >= 10 && !pumpRunning &&
+      !accounting && !valveMoving() && valve != Valve::Open;
+  if (watering.request(now, sensors.soilPercent, soilTarget, soilHealthy,
+                       allowed, Config::autoSoakMs, Config::relativeMoistureMargins)) {
+    pumpStarted = now;
+    setPump(true);
+  }
+}
+
 void handleButton(Button button, uint32_t now) {
   if (button == Button::None) return;
+  if (mode == Mode::Auto && !choosingMode && !fullWarning &&
+      autoStage == AutoStage::Running && !filling && autoScreen == AutoScreen::Reference) {
+    if (button == Button::Up || button == Button::Down) {
+      if (!editingTarget) editedTarget = soilTarget;
+      editingTarget = true;
+      editedTarget = AutoLogic::nextTarget(editedTarget, button == Button::Up);
+      return;
+    }
+    if (button == Button::Select && editingTarget) {
+      soilTarget = editedTarget;
+      EEPROM.update(0, soilTarget);
+      EEPROM.update(1, uint8_t(~soilTarget));
+      editingTarget = false;
+      return;
+    }
+  }
   if (button == Button::Select) {
     if (!choosingMode) { pendingMode = mode; choosingMode = true; }
     else {
-      mode = pendingMode;
+      changeMode(pendingMode, now);
       choosingMode = false;
       screen = Screen::Air;
-      if (mode == Mode::Auto) {
-        setPump(false);
-        // AUTO has no watering algorithm yet. Close a known open inlet.
-        if (valve == Valve::Opening || valve == Valve::Open) startValve(false, now);
-      }
     }
     return;
   }
@@ -235,7 +411,22 @@ void handleButton(Button button, uint32_t now) {
       pendingMode = pendingMode == Mode::Manual ? Mode::Auto : Mode::Manual;
     return;
   }
-  if (mode != Mode::Manual) return;
+  if (mode == Mode::Auto) {
+    if (fullWarning || filling || autoStage != AutoStage::Running) return;
+    if (button == Button::Left || button == Button::Right) {
+      const uint8_t count = static_cast<uint8_t>(AutoScreen::Count);
+      autoScreen = static_cast<AutoScreen>((static_cast<uint8_t>(autoScreen) +
+          (button == Button::Right ? 1 : count - 1)) % count);
+      editingTarget = false; // Leaving without SELECT discards the draft.
+    } else if (autoScreen == AutoScreen::Valve) {
+      if (button == Button::Down) startValve(false, now);
+      if (button == Button::Up && tankHealthy(now) && sensors.tankLevel <= 90) {
+        setPump(false);
+        startValve(true, now);
+      }
+    }
+    return;
+  }
   if (button == Button::Left || button == Button::Right) {
     const uint8_t count = static_cast<uint8_t>(Screen::Count);
     screen = static_cast<Screen>((static_cast<uint8_t>(screen) +
@@ -275,18 +466,115 @@ class LcdLine : public Print {
   }
 };
 
+void renderAuto(LcdLine &top, LcdLine &bottom, uint32_t now) {
+  if (fullWarning) {
+    top.print(F("A TANK FULL"));
+    if (((now - fullWarningAt) / 250) % 2 == 0) bottom.print(F("Closing shortly"));
+    return;
+  }
+  if (autoStage == AutoStage::Intro) {
+    top.print(F("A Soil target")); bottom.print(soilTarget); bottom.print('%');
+    return;
+  }
+  if (autoStage == AutoStage::Analyze) {
+    top.print(F("A Tank analysis")); bottom.print(tankStatus(now)); return;
+  }
+  if (filling) {
+    top.print(sensors.tankLevel < 10 ? F("A TANK EMPTY") : F("A Filling tank"));
+    bottom.print(F("Level: ")); bottom.print(sensors.tankPercent); bottom.print('%');
+    return;
+  }
+  switch (autoScreen) {
+    case AutoScreen::Reference:
+      top.print(F("A Soil target")); if (editingTarget) top.print('*');
+      bottom.print(editingTarget ? editedTarget : soilTarget);
+      bottom.print(F("% U/D SEL save"));
+      break;
+    case AutoScreen::Mode:
+      top.print(F("A Mode: AUTO")); bottom.print(F("SEL change mode")); break;
+    case AutoScreen::Valve:
+      top.print(F("A Valve:")); top.print(valveText());
+      if (tankHealthy(now)) {
+        bottom.print(F("Tank:")); bottom.print(sensors.tankPercent); bottom.print(F("% U+ D-"));
+      } else bottom.print(tankStatus(now));
+      break;
+    case AutoScreen::Info: {
+      const uint8_t page = (now / Config::infoPageMs) % 8;
+      const bool airOk = sensors.airValid && !elapsed(now, sensors.airAt, Config::sensorStaleMs);
+      const float baseline = Config::traditionalWaterMlPerDay * (monitorSeconds / 86400.0f);
+      const bool savingsKnown = waterEstimateValid && baseline > 0;
+      const float saved = baseline - usedWaterMl;
+      switch (page) {
+        case 0:
+          top.print(F("A Air temp"));
+          if (airOk) { bottom.print(sensors.temperature, 1); bottom.print(F(" C")); }
+          else bottom.print(F("Air sensor ERR"));
+          break;
+        case 1:
+          top.print(F("A Air humidity"));
+          if (airOk) { bottom.print(sensors.humidity, 1); bottom.print('%'); }
+          else bottom.print(F("Air sensor ERR"));
+          break;
+        case 2:
+          top.print(F("A Soil moisture"));
+          if (!sensors.soilValid) bottom.print(F("Soil sensor ERR"));
+          else {
+            bottom.print(sensors.soilPercent); bottom.print(F("% "));
+            if (pumpRunning) bottom.print(F("Watering"));
+            else if (watering.waiting) bottom.print(F("Soaking"));
+            else if (sensors.soilPercent >= soilTarget) bottom.print(F("Target OK"));
+            else bottom.print(F("Monitoring"));
+          }
+          break;
+        case 3: {
+          const auto fault = diagnostic(now);
+          top.print(fault ? F("A System fault") : F("A System OK"));
+          bottom.print(fault ? fault : F("Sensors OK"));
+          break;
+        }
+        case 4:
+          top.print(F("A Used water est"));
+          if (waterEstimateValid) { bottom.print(usedWaterMl, 0); bottom.print(F(" mL")); }
+          else bottom.print(F("N/A: level fault"));
+          break;
+        case 5:
+          top.print(F("A Saved water"));
+          if (savingsKnown) { bottom.print(saved, 0); bottom.print(F(" mL est")); }
+          else bottom.print(Config::traditionalWaterMlPerDay > 0 ? F("N/A: level fault") : F("Set baseline/day"));
+          break;
+        case 6:
+          top.print(F("A Efficiency"));
+          if (savingsKnown) {
+            bottom.print(constrain((saved / baseline) / 0.70f * 100.0f, 0.0f, 100.0f), 0);
+            bottom.print(F("% of 70% goal"));
+          } else bottom.print(Config::traditionalWaterMlPerDay > 0 ? F("N/A: level fault") : F("Set baseline/day"));
+          break;
+        case 7:
+          top.print(F("A Plant monitor"));
+          bottom.print(monitorSeconds / 86400UL); bottom.print(F("d "));
+          bottom.print((monitorSeconds / 3600UL) % 24); bottom.print(F("h "));
+          bottom.print((monitorSeconds / 60UL) % 60); bottom.print(F("m "));
+          bottom.print(monitorSeconds % 60); bottom.print('s');
+          break;
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
 void render(uint32_t now) {
   static uint32_t lastDisplay = 0;
   static char previous[2][17] = {};
   if (!elapsed(now, lastDisplay, Config::displayRefreshMs)) return;
   lastDisplay = now;
   LcdLine top, bottom;
-  if (choosingMode) {
-    top.print(F("Mode: "));
+  if (choosingMode && !(mode == Mode::Auto && fullWarning)) {
+    top.print(mode == Mode::Auto ? F("A Mode: ") : F("Mode: "));
     top.print(pendingMode == Mode::Manual ? F("MANUAL") : F("AUTO"));
     bottom.print(F("L/R choose SEL OK"));
   } else if (mode == Mode::Auto) {
-    top.print(F("AUTO unavailable")); bottom.print(F("SEL change mode"));
+    renderAuto(top, bottom, now);
   } else {
     switch (screen) {
       case Screen::Air:
@@ -335,6 +623,10 @@ void render(uint32_t now) {
 }
 
 void setup() {
+  const uint8_t savedTarget = EEPROM.read(0);
+  if (AutoLogic::validTarget(savedTarget) && EEPROM.read(1) == uint8_t(~savedTarget))
+    soilTarget = savedTarget;
+  editedTarget = soilTarget;
   if (Config::tankDebugSerial) {
     Serial.begin(115200);
     Serial.println(F("SmartRePlant MAIN: tank debug, 30ms timeout / 500ms sampling"));
@@ -348,12 +640,17 @@ void setup() {
   pinMode(Config::echoPin, INPUT);
   pinMode(Config::buttonsPin, INPUT);
   pinMode(Config::soilPin, INPUT);
-  // D10 stays untouched: LCD shield backlight circuits vary.
+  backlight(true);
   lcd.begin(16, 2);
   dht.begin();
 }
 
 void loop() {
+  static uint32_t lastMonitorTick = 0;
+  const uint32_t tick = millis();
+  const uint32_t seconds = uint32_t(tick - lastMonitorTick) / 1000;
+  monitorSeconds += seconds;
+  lastMonitorTick += seconds * 1000;
   updateActuators(millis());
   const Button button = buttonPressed(millis());
   readSensors(millis());
@@ -361,6 +658,7 @@ void loop() {
   const uint32_t now = millis();
   applyTankProtection(now);
   handleButton(button, now);
+  updateAuto(millis());
   updateActuators(millis());
   render(millis());
 }

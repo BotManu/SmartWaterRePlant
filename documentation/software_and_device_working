@@ -13,10 +13,28 @@ There are multiple screens that can be cycled using left / right buttons
 - the temp / humid of the air can be displayed on first screen
 - the soil humidity level can be displayed on second screen
 - the valve (one that allows water to be poured into the tank) state is displayed and can be commuted
-using up / down buttons. The same screen shows water level in percents (tank heigth is about 45 mm, sensor reads 55 mm when the tank is empty and 20 mm for the full tank (for safety))
+using up / down buttons. The same screen shows water level in percents (tank heigth is about 45 mm, sensor reads 55 mm when the tank is empty; the requested full point is now 5 mm, allowing 15 mm more depth than the previous 20 mm full point. This requires repositioning/recalibration because the HC-SR04 minimum range is 20 mm; see manual_mode.md.)
 - the water pump state is displayed and can be turned on in periods of 2 seconds at the press of the up button (the displayed state turns to running)
 - a general system diagnosys screen shows if running is safe (all sensors are within normal limits, tank is not overflowing)
 
 For implementing the manual mode keep in mind that:
 - turning the stepper clockwise for 5 seconds opens the valve
 - turning the stepper anti-clockwise for 5 seconds closes the valve
+
+
+The auto mode:
+
+The purpose of the auto mode is to keep the soil moisture around a set value. That is when the moisture drops below 10% of the set value, the plant is being watered for one round of 2s (pump running for 2s).
+Then, the moisture response is monitored for the following 5 minutes and if it still lower than 2% below the set value the plant is watered again for 2s and moisture response monitored in the following 5 minutes. Moisture is then confirmed to be ok if it is at least at the set value.
+
+Program flow: when auto mode is selected, the display shows the default/set value of the soil moisture for 5 seconds.
+The firmware runs a tanks status analysis, and closes the valve if the tank level is greater than 90%. This comes with a flashing of the lcd backlight for 3 seconds first.
+Then the screens of the auto mode all have A in the top left corner.
+The screens are cycled using right/left buttons
+- One screen: can set reference soil moisture between 20% and 95% in increments of 10 then 5 (between 70 and 95). Sets it using up/down and select button.
+- One screen is the UI screen that shows general info alternatively: air temp, air humidity, soil moisture, system ok/system fault, used water (one full tank has one liter), saved water (against the traditional watering of a 15 cm plant), system efficiency (against a maximum of 70% saved water), total time of system running (displayed as plant monitor time).
+- One screen is the mode selection: auto / manual.
+- One screen pops up when the tank is empty (below 10%). This opens the valve. This then shows the tank level till the filling ends (the water tank level is no longer growing). This sceen pops up when the system detects that water is being poured into the tank (for this filter the last 10 readings of the sensor).
+The valve always closes when the tank level is above 90% but first the display flashes with TANK FULL message for 5 seconds.
+- One screen has some manual controls within the auto mode: valve open/close and displays tank level.
+Water level ultrasonic sensor readings are filtered by the last 5 values: strange values removed and an average of the remaining values is displayed - this also in manual mode as well.

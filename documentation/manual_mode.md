@@ -24,18 +24,21 @@ on A2. The pin assignments are those in `hardware_structure`.
   configured limits, and the tank is neither empty nor at its full limit.
   Otherwise it displays NOT SAFE and the first detected issue.
 
-AUTO is selectable but displays `AUTO unavailable`; no automatic watering is
-implemented. Confirming AUTO stops the pump and closes a valve that is known to
-be open or opening. An already running closing movement finishes normally.
-Use SELECT, LEFT/RIGHT, SELECT to return to MANUAL.
+AUTO is implemented as described in `auto_mode.md`. Changing modes stops the pump.
+Use SELECT, LEFT/RIGHT, SELECT to return to MANUAL. The latest five valid tank
+readings are filtered using median outlier rejection and a remaining-value mean
+in both modes.
 
 ## Tank behavior and faults
 
-Tank percentage is clamped to 0..100 using `(55 - distance_mm) / 35 * 100`:
-55 mm is empty, 37.5 mm is 50%, and 20 mm is the configured full limit.
+Tank percentage is clamped to 0..100 using `(55 - distance_mm) / 50 * 100`:
+55 mm is empty, 30 mm is 50%, 20 mm is 70%, and 5 mm is the requested full limit.
 The documented 45 mm tank height is not used instead of these measured distances.
 
-An empty tank or invalid/stale ultrasonic reading blocks/stops the pump. Manual
+An empty tank or confirmed invalid/stale ultrasonic reading blocks/stops the pump.
+Isolated rejected echoes hold the trusted level for less than 1.5 seconds; after
+that it becomes a fault. Startup/recovery and jumps above 6 mm require three
+consistent readings. See `auto_mode.md` for the shared filter details. Manual
 valve UP/DOWN commands work independently of tank readings, as specified in
 `software_and_device_working`. Full/invalid readings do not block opening or
 automatically reverse a manual valve movement. Tank faults remain visible on the
@@ -45,14 +48,19 @@ do not disable manual actuation.
 
 The ultrasonic read has a 30 ms timeout and repeats every 500 ms. Distances below
 20 mm, above 80 mm, and missing echoes are faults rather than valid percentages.
-The 20 mm full point is at the HC-SR04's nominal minimum range: check actual
-readings near full before relying on this placement. A missing echo cannot
+The requested 5 mm full point is below the HC-SR04's 20 mm minimum range.
+With the current mounting, levels above 70% cannot be reliably measured and the
+sensor validity check will fault before AUTO's >90% full warning. Raise the sensor
+at least 15 mm and recalibrate both endpoints: a 15 mm rise gives approximately
+70 mm empty / 20 mm full for the same requested water levels. Additional mounting
+clearance provides margin above the minimum range. A missing echo cannot
 distinguish overflow from a disconnected sensor. Closing itself takes five
 seconds; leave enough physical filling margin for that travel time.
 
 Soil is sampled every 250 ms. DHT reads run every 2.5 seconds when actuators are
 idle to avoid interrupting their timing with the DHT library's blocking read.
-Readings older than ten seconds are considered stale. The LCD refreshes at most
+Air/soil readings older than ten seconds are considered stale; tank readings use
+the shorter 1.5-second trusted-reading limit. The LCD refreshes at most
 five times per second and only rewrites changed rows. Buttons are debounced and
 require a release between actions. Timers work across `millis()` rollover.
 
@@ -90,7 +98,8 @@ Bench checks (require the actual hardware; not performed by the build):
 1. Verify the pump is off at boot, valve shows Unknown, and each button works.
 2. Navigate both directions through all five screens; confirm wraparound and
    alternating temperature/humidity. Check the soil percentage against calibration.
-3. Verify tank readings at 55, 37.5, and 20 mm. Disconnect ECHO and verify ERR.
+3. Verify tank readings at 55, 30, and 20 mm (0%, 50%, 70%). Reposition and
+   recalibrate the sensor before testing the new full point. Disconnect ECHO and verify ERR.
 4. At a valid intermediate level, verify UP opens and DOWN closes for five
    seconds, with the expected direction. Change screens during travel and confirm
    movement still finishes. Verify the coils switch off afterward.
@@ -105,4 +114,4 @@ Bench checks (require the actual hardware; not performed by the build):
    tank, and missing ECHO. Restore valid readings and check recovery.
 8. Enter the selector during an actuator action and verify its timer continues.
    Choose AUTO without confirming: mode must not change. Confirm AUTO: pump
-   stops, a known open inlet closes, and UP cannot start watering. Return to MANUAL.
+   stops and the five-second target screen appears. Return to MANUAL.

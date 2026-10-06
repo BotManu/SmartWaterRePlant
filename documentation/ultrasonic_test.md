@@ -24,7 +24,10 @@ only its pulse width.
 The main `uno` firmware also logs readings at 115200 baud when
 `Config::tankDebugSerial` is true (currently enabled). It prints a MAIN startup
 banner and adds `read_us`, the total measurement time, alongside `pulse_us`.
-Logging is deferred while the pump or valve motor is running. Its valve and
+The main firmware also logs `accepted` and `age_ms` for its validated tank
+filter. A rejected sample may briefly show `Tank: held`; startup or recovery can
+show `Tank: checking`. The standalone diagnostic intentionally shows unfiltered
+raw readings for comparison. Logging is deferred while the pump or valve motor is running. Its valve and
 diagnostics screens show specific no-echo, stuck-HIGH, range, or stale faults.
 No tank range limits have been widened. Missing echoes can now block the loop
 for up to 30 ms; this can delay actuator servicing by that much.
@@ -41,9 +44,10 @@ for up to 30 ms; this can delay actuator servicing by that much.
 
 First aim at a flat target about 100..200 mm from the sensor face. A numeric
 distance with Above max range is expected there. Then try measured distances
-of 55 mm and 37.5 mm: they should be inside the application range, corresponding
-to 0% and 50% tank level. Check the 20 mm full point separately because it is
-at the nominal HC-SR04 minimum distance. Do not change tank calibration solely
+of 55 mm and 30 mm: they should be inside the application range, corresponding
+to 0% and 50% tank level. The requested 5 mm full point is below the nominal
+20 mm HC-SR04 minimum distance; reposition and recalibrate before testing full.
+Do not change tank calibration solely
 to suppress an error before measuring the actual sensor-to-water distances.
 
 For the standard 5V HC-SR04, connect VCC to 5V and GND to Arduino GND. Recheck
