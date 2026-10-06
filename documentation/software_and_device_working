@@ -1,0 +1,22 @@
+The main objective of the firmware is to water the plant when necessary and keep the soil within a certain
+level of humidity. As secondary function, the firmware also displays environmental temperature and humidity
+on the lcd (alternatively).
+
+The device has two operating modes: AUTO and MANUAL
+
+The manual/auto select procedure:
+When the select button is pressed the device shows the current mode. Using left / right buttons the user can switch between manual and auto and it has to press select button in order to enter the specific mode.
+
+The manual mode:
+In the manual mode:
+There are multiple screens that can be cycled using left / right buttons
+- the temp / humid of the air can be displayed on first screen
+- the soil humidity level can be displayed on second screen
+- the valve (one that allows water to be poured into the tank) state is displayed and can be commuted
+using up / down buttons. The same screen shows water level in percents (tank heigth is about 45 mm, sensor reads 60 mm when the tank is empty and 20 mm for the full tank (for safety))
+- the water pump state is displayed and can be turned on in periods of 2 seconds at the press of the up button (the displayed state turns to running)
+- a general system diagnosys screen shows if running is safe (all sensors are within normal limits, tank is not overflowing)
+
+For implementing the manual mode keep in mind that:
+- turning the stepper clockwise for 5 seconds opens the valve
+- turning the stepper anti-clockwise for 5 seconds closes the valve
