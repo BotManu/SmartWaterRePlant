@@ -15,7 +15,7 @@ LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 DHT dht(Config::dhtPin, Config::dhtType);
 enum class Button : uint8_t { None, Right, Up, Down, Left, Select };
 enum class Mode : uint8_t { Manual, Auto };
-enum class Screen : uint8_t { Air, Soil, Valve, Pump, Diagnostics, Count };
+enum class Screen : uint8_t { Air, Soil, SoilDebug, Valve, Pump, Drain, Diagnostics, Count };
 enum class Valve : uint8_t { Unknown, Opening, Open, Closing, Closed };
 enum class AutoScreen : uint8_t { Reference, Info, Mode, Valve, Count };
 enum class AutoStage : uint8_t { Intro, Analyze, Running };
@@ -45,6 +45,7 @@ Valve valve = Valve::Unknown;
 bool choosingMode = false;
 bool pumpRunning = false;
 uint32_t pumpStarted = 0;
+uint32_t pumpDurationMs = Config::pumpRunMs;
 uint32_t valveStarted = 0;
 uint32_t lastStepUs = 0;
 uint8_t phase = 0;
@@ -129,7 +130,7 @@ void startValve(bool opening, uint32_t now) {
 }
 
 void updateActuators(uint32_t now) {
-  if (pumpRunning && elapsed(now, pumpStarted, Config::pumpRunMs)) setPump(false);
+  if (pumpRunning && elapsed(now, pumpStarted, pumpDurationMs)) setPump(false);
   if (!valveMoving()) return;
   if (elapsed(now, valveStarted, Config::valveTravelMs)) {
     valve = valve == Valve::Opening ? Valve::Open : Valve::Closed;
@@ -254,8 +255,9 @@ void readSensors(uint32_t now) {
     sensors.soilRaw = analogRead(Config::soilPin);
     sensors.soilValid = sensors.soilRaw >= Config::soilMinValidAdc &&
                         sensors.soilRaw <= Config::soilMaxValidAdc;
-    sensors.soilPercent = constrain(map(sensors.soilRaw, Config::soilDryAdc,
-                                      Config::soilWetAdc, 0, 100), 0L, 100L);
+    sensors.soilPercent = int(roundf(constrain(
+        Config::soilPercentOffset + Config::soilPercentPerAdc * sensors.soilRaw,
+        0.0f, 100.0f)));
     sensors.soilAt = millis();
   }
   // The DHT library blocks briefly. Defer it while timed actuators are running.
@@ -395,6 +397,7 @@ void updateAuto(uint32_t now) {
   if (watering.request(now, sensors.soilPercent, soilTarget, soilHealthy,
                        allowed, Config::autoSoakMs, Config::relativeMoistureMargins)) {
     pumpStarted = now;
+    pumpDurationMs = Config::pumpRunMs;
     setPump(true);
   }
 }
@@ -419,6 +422,7 @@ void handleButton(Button button, uint32_t now) {
     }
   }
   if (button == Button::Select) {
+    if (mode == Mode::Manual && screen == Screen::Drain) setPump(false);
     if (!choosingMode) { pendingMode = mode; choosingMode = true; }
     else {
       changeMode(pendingMode, now);
@@ -449,6 +453,7 @@ void handleButton(Button button, uint32_t now) {
     return;
   }
   if (button == Button::Left || button == Button::Right) {
+    if (screen == Screen::Drain) setPump(false);
     const uint8_t count = static_cast<uint8_t>(Screen::Count);
     screen = static_cast<Screen>((static_cast<uint8_t>(screen) +
         (button == Button::Right ? 1 : count - 1)) % count);
@@ -460,6 +465,16 @@ void handleButton(Button button, uint32_t now) {
     if (button == Button::Up && !pumpRunning && tankHealthy(now) &&
         sensors.distanceMm < Config::tankEmptyMm) {
       pumpStarted = now;
+      pumpDurationMs = Config::pumpRunMs;
+      setPump(true);
+    }
+  } else if (screen == Screen::Drain) {
+    if (button == Button::Down) setPump(false);
+    // Like the ultrasonic diagnostic, draining is a timed manual override:
+    // do not require a settled level or apply the calibrated empty cutoff.
+    if (button == Button::Up && !pumpRunning) {
+      pumpStarted = now;
+      pumpDurationMs = Config::drainRunMs;
       setPump(true);
     }
   }
@@ -601,7 +616,7 @@ void render(uint32_t now) {
   } else {
     switch (screen) {
       case Screen::Air:
-        top.print(F("MANUAL 1/5 Air"));
+        top.print(F("MANUAL 1/7 Air"));
         if (!sensors.airValid || elapsed(now, sensors.airAt, Config::sensorStaleMs))
           bottom.print(F("Air sensor ERR"));
         else if ((now / Config::airDisplayMs) % 2 == 0) {
@@ -611,9 +626,16 @@ void render(uint32_t now) {
         }
         break;
       case Screen::Soil:
-        top.print(F("MANUAL 2/5 Soil"));
+        top.print(F("MANUAL 2/7 Soil"));
         if (!sensors.soilValid) bottom.print(F("Soil sensor ERR"));
         else { bottom.print(F("Moisture: ")); bottom.print(sensors.soilPercent); bottom.print('%'); }
+        break;
+      case Screen::SoilDebug:
+        top.print(F("M 3/7 Soil debug"));
+        if (!sensors.soilAt) bottom.print(F("ADC: waiting"));
+        else {
+          bottom.print(F("Raw ADC: ")); bottom.print(sensors.soilRaw);
+        }
         break;
       case Screen::Valve:
         top.print(F("Valve: ")); top.print(valveText());
@@ -628,6 +650,22 @@ void render(uint32_t now) {
         else if (!tankHealthy(now)) bottom.print(tankStatus(now));
         else bottom.print(sensors.distanceMm < Config::tankEmptyMm ?
                           F("UP:2s DOWN:stop") : F("Tank empty"));
+        break;
+      case Screen::Drain:
+        top.print(F("Drain "));
+        if (pumpRunning) {
+          const uint32_t runMs = uint32_t(now - pumpStarted);
+          top.print(runMs >= pumpDurationMs ? 0UL :
+                    (pumpDurationMs - runMs + 999) / 1000);
+          top.print(F("s D:stop"));
+        } else top.print(F("U:10s D:stop"));
+        if (!sensors.tankSampleAt) bottom.print(F("US: waiting"));
+        else if (!sensors.echoUs || !isfinite(sensors.rawDistanceMm))
+          bottom.print(F("US: no echo"));
+        else {
+          bottom.print(F("US: ")); bottom.print(sensors.rawDistanceMm, 1);
+          bottom.print(F(" mm"));
+        }
         break;
       case Screen::Diagnostics: {
         const auto fault = diagnostic(now);

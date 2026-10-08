@@ -15,6 +15,7 @@ constexpr bool relayActiveLow = true;
 constexpr bool reverseStepper = false; // Toggle if UP turns counterclockwise.
 constexpr uint32_t valveTravelMs = 5000;
 constexpr uint32_t pumpRunMs = 2000;
+constexpr uint32_t drainRunMs = 10000;
 constexpr uint32_t stepIntervalUs = 2000; // Half steps; tune to the actual motor.
 constexpr uint32_t debounceMs = 40;
 constexpr uint32_t tankReadMs = 500; // Match the verified ultrasonic diagnostic.
@@ -46,7 +47,7 @@ constexpr uint8_t backlightPin = 10;
 constexpr unsigned long echoTimeoutUs = 30000;
 constexpr bool tankDebugSerial = true; // Raw readings at 115200 baud while idle.
 constexpr float tankEmptyMm = 61.5f;
-constexpr float tankFullMm = 42.4f;
+constexpr float tankFullMm = 26.4f;
 constexpr float tankEndpointToleranceMm = 5.0f;
 constexpr bool tankReadingInRange(float distanceMm) {
   return distanceMm >= tankFullMm - tankEndpointToleranceMm &&
@@ -54,9 +55,10 @@ constexpr bool tankReadingInRange(float distanceMm) {
 }
 constexpr float tankMinReadableMm = 20.0f;
 constexpr float tankMaxPlausibleMm = 80.0f;
-// Initial calibration estimates: replace with measured dry/wet readings.
-constexpr int soilDryAdc = 800;
-constexpr int soilWetAdc = 350;
+// Least-squares fit: ADC/% pairs 455/55, 236/86, 239/85, 250/77, 260/80.
+// Extrapolate outside the measured range; clamp displayed moisture to 0..100%.
+constexpr float soilPercentPerAdc = -0.1311112373f;
+constexpr float soilPercentOffset = 114.3600363f;
 constexpr int soilMinValidAdc = 1;
 constexpr int soilMaxValidAdc = 1022;
 // DHT11 operating limits; not plant-specific watering thresholds.
@@ -70,7 +72,7 @@ constexpr int upThreshold = 195;
 constexpr int downThreshold = 380;
 constexpr int leftThreshold = 555;
 constexpr int selectThreshold = 790;
-static_assert(soilDryAdc != soilWetAdc, "Soil calibration points must differ");
+static_assert(soilPercentPerAdc < 0, "Soil moisture must increase as ADC decreases");
 static_assert(tankEmptyMm > tankFullMm, "Empty distance must exceed full distance");
 static_assert(tankConfirmReadings >= 2, "Tank changes require multiple readings");
 }
